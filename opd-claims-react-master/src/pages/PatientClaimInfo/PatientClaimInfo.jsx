@@ -1,0 +1,1149 @@
+import { useState, useEffect, useMemo, useRef } from 'react'
+import { useParams, useNavigate, useLocation } from 'react-router-dom'
+import { useSelector, useDispatch } from 'react-redux'
+import { selectUser } from '../../store/slices/authSlice'
+import { selectSelectedClaim, updateAssignmentStatus } from '../../store/slices/claimsSlice'
+import ClaimHeader from './components/ClaimHeader'
+import TabNavigation from './components/TabNavigation'
+import DocumentViewer from '../../components/common/DocumentViewer'
+import PatientDetails from './components/PatientDetails'
+import ClaimDetails from './components/ClaimDetails'
+import PolicyDetails from './components/PolicyDetails'
+import DigitisationTab from './components/DigitisationTab'
+import ChecklistTab from './components/ChecklistTab'
+import ClinicalValidationTab from './components/ClinicalValidationTab'
+import ReviewTab from './components/ReviewTab'
+import ActionBar from './components/ActionBar'
+import QueryManagementModal from '../../components/modals/QueryManagementModal'
+import { getClaimDetailsById } from '../../constants/mockData'
+import claimsService from '../../services/claimsService'
+import { transformClaimExtractionData, transformAdjudicationData } from '../../utils/transformClaimData'
+import { buildExtractionPatchPayload } from '../../utils/buildExtractionPatchPayload'
+import { clearSelectedDiagnoses } from '../../store/slices/diagnosisSlice'
+import { clearSelectedSymptoms } from "../../store/slices/symptomsSlice.jsx";
+import { getWorkflowStage } from '../../utils/claimStatus'
+
+/**
+ * Patient Claim Info Page
+ * Full-page view without sidebar for detailed claim information
+ */
+const PatientClaimInfo = () => {
+  const { claimId } = useParams()
+  const navigate = useNavigate()
+  const location = useLocation()
+  const dispatch = useDispatch()
+
+  // Get selected symptoms and diagnoses from Redux store
+  const selectedSymptoms = useSelector(state => state.symptoms?.selectedSymptoms || [])
+  const selectedDiagnoses = useSelector(state => state.diagnosis?.selectedDiagnoses || [])
+  // Get assignment status from Redux store
+  const assignmentStatus = useSelector(state => state.claims?.assignmentStatus || null)
+  const selectedClaim = useSelector(selectSelectedClaim)
+  // Get logged in user from Redux store
+  const loggedInUser = useSelector(selectUser)
+
+  const [activeTab, setActiveTab] = useState('patient-info')
+  const [currentPage, setCurrentPage] = useState(1)
+  const [selectedDocumentIndex, setSelectedDocumentIndex] = useState(0)
+  const [isQueryModalOpen, setIsQueryModalOpen] = useState(false)
+  const [timeRemaining, setTimeRemaining] = useState(null)
+  const [timerStarted, setTimerStarted] = useState(false)
+  const [claimData, setClaimData] = useState(null)
+  const [invoices, setInvoices] = useState([]) //  Added invoices state
+  const [validatedInvoices, setValidatedInvoices] = useState({}) // Track validated invoices
+  const [invalidInvoices, setInvalidInvoices] = useState({}) // Track invalid invoices
+  const [originalInvoiceKey, setOriginalInvoiceKey] = useState('invoices') // Store original invoice key from API
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(null)
+  const [clinicalLoading, setClinicalLoading] = useState(false)
+  const [clinicalError, setClinicalError] = useState(null)
+  const [rawApiResponse, setRawApiResponse] = useState(null)
+  const [rawExtractionResponse, setRawExtractionResponse] = useState(null)
+  const [clinicalSaveFunction, setClinicalSaveFunction] = useState(null)
+  const [checklistSaveFunction, setChecklistSaveFunction] = useState(null)
+  const [reviewLoading, setReviewLoading] = useState(false)
+  const [isChecklistTabLocked, setIsChecklistTabLocked] = useState(true)
+  const [isClinicalTabLocked, setIsClinicalTabLocked] = useState(true)
+  const [isReviewTabLocked, setIsReviewTabLocked] = useState(true)
+  const [clinicalInvoiceItems, setClinicalInvoiceItems] = useState([])
+  const [reviewTotals, setReviewTotals] = useState({ totalApproved: 0, totalSavings: 0 })
+  const [editStatus, setEditStatus] = useState(null)
+  const [assignedUsername, setAssignedUsername] = useState(null)
+  const [isViewOnlyMode, setIsViewOnlyMode] = useState(false)
+  const [showTimeoutModal, setShowTimeoutModal] = useState(false)
+  const [currentUsername, setCurrentUsername] = useState(null)
+  const [showAssignmentErrorModal, setShowAssignmentErrorModal] = useState(false)
+  const [showNoDocumentsModal, setShowNoDocumentsModal] = useState(false)
+  const [shouldShowRedigitize, setShouldShowRedigitize] = useState(false)
+  const [redigitizeLoading, setRedigitizeLoading] = useState(false)
+  const [workflowStage, setWorkflowStage] = useState('PENDING')
+  const [claimStatusData, setClaimStatusData] = useState(null)
+  const [showRedigitizeInfoModal, setShowRedigitizeInfoModal] = useState(false)
+
+  // Track if assignment API has been attempted to prevent infinite loop
+  const assignmentAttempted = useRef(false)
+
+  // Reset diagnosis selections whenever the user switches claims or leaves the page
+  useEffect(() => {
+    if (!claimId) return
+
+    dispatch(clearSelectedDiagnoses())
+
+    return () => {
+      dispatch(clearSelectedDiagnoses())
+    }
+  }, [claimId, dispatch])
+
+    // Reset symptoms selections whenever the user switches claims or leaves the page
+    useEffect(() => {
+        if (!claimId) return
+
+        dispatch(clearSelectedSymptoms())
+
+        return () => {
+            dispatch(clearSelectedSymptoms())
+        }
+    }, [claimId, dispatch])
+
+  // Call assignment API on component mount (only if not already assigned)
+  useEffect(() => {
+    const assignClaim = async () => {
+      // Prevent infinite loop - only attempt assignment once
+      if (assignmentAttempted.current) {
+        console.log('Assignment already attempted, skipping')
+        return
+      }
+
+      try {
+        // Get assignment status from Redux store
+        if (!assignmentStatus) {
+          console.warn('Assignment status not found in store')
+          return
+        }
+
+        // Calculate time remaining from created_at
+        const createdAt = assignmentStatus.created_at
+        let isTimeExpired = false
+        if (createdAt) {
+          const createdAtDate = new Date(createdAt)
+          const currentDate = new Date()
+          const elapsedSeconds = Math.floor((currentDate - createdAtDate) / 1000)
+          const totalSeconds = 11000 * 60 // 11000 minutes
+          const remainingSeconds = totalSeconds - elapsedSeconds
+          isTimeExpired = remainingSeconds <= 0
+        }
+
+        // Only call assignment API if:
+        // 1. Not already assigned
+        // 2. Not expired
+        // 3. Time not expired (calculated from created_at)
+        const shouldAssign = !assignmentStatus.is_assigned &&
+                           !assignmentStatus.is_expired &&
+                           !isTimeExpired
+
+        if (shouldAssign) {
+          // Mark assignment as attempted before API call
+          assignmentAttempted.current = true
+
+          const response = await claimsService.assignClaim(claimId, { duration_minutes: 11000 })
+
+          console.log('Assignment API Response:', response)
+
+          // Check if assignment failed (response.data might have success field)
+          if (response && response.success === false) {
+            console.log('Assignment failed - showing modal')
+            setShowAssignmentErrorModal(true)
+          } else if (response && response.success === true && response.data) {
+            // Update Redux store with new assignment status
+            dispatch(updateAssignmentStatus(response.data))
+          }
+        } else {
+          console.log('Should not assign - already assigned or expired')
+          assignmentAttempted.current = true // Mark as attempted even if we skip
+        }
+      } catch (err) {
+        console.error('Error assigning claim:', err)
+        console.log('Error response data:', err.response?.data)
+
+        // Check if error response has success: false
+        if (err.response?.data?.success === false) {
+          console.log('Assignment error - showing modal')
+          setShowAssignmentErrorModal(true)
+        }
+      }
+    }
+
+    if (claimId && assignmentStatus && !assignmentAttempted.current) {
+      assignClaim()
+    }
+  }, [claimId, assignmentStatus, dispatch])
+
+  // Fetch claim extraction data from API
+  useEffect(() => {
+    const fetchClaimData = async () => {
+      try {
+        setLoading(true)
+        setError(null)
+
+        const response = await claimsService.getClaimExtractionData(claimId)
+
+        // Store raw extraction response separately for digitisation tab and checklist tab
+        setRawExtractionResponse(response)
+        // Also store in rawApiResponse for backward compatibility
+        setRawApiResponse(response)
+
+        const extractionOutputData = response?.data?.output_data ?? response?.output_data ?? null
+        const hasBillingDetails = !!extractionOutputData?.billing_details
+        const documentsFromResponse = Array.isArray(response?.data?.documents)
+          ? response.data.documents
+          : Array.isArray(response?.documents)
+            ? response.documents
+            : []
+
+        const transformedData = transformClaimExtractionData(response)
+
+        if (transformedData) {
+          let shouldEnableRedigitize = false
+          setClaimData(transformedData)
+          // set invoices state after data load
+          setInvoices(transformedData?.digitisationData?.invoices || [])
+
+          const hasTransformedDocuments = Array.isArray(transformedData?.documents) && transformedData.documents.length > 0
+          const hasDocuments = hasTransformedDocuments || documentsFromResponse.length > 0
+          setShowNoDocumentsModal(!hasDocuments)
+          shouldEnableRedigitize = !hasBillingDetails && hasDocuments
+          if (!hasDocuments) {
+            setSelectedDocumentIndex(0)
+            setCurrentPage(1)
+          }
+
+          // Extract and store the original invoice key from the API response
+          const outputData = extractionOutputData
+          if (outputData) {
+            const invoiceKey = Object.keys(outputData).find(key =>
+              key === 'invoices' || key.includes('invoice')
+            )
+            if (invoiceKey) {
+              setOriginalInvoiceKey(invoiceKey)
+            }
+          }
+
+          // Extract edit_status and assignment info from claim_status
+          const claimStatus = response?.data?.claim_status ?? response?.claim_status ?? null
+          const extractedEditStatus = claimStatus?.edit_status
+          const extractedAssignedUsername = claimStatus?.assignment?.assigned_to_username
+
+          setEditStatus(extractedEditStatus)
+          setAssignedUsername(extractedAssignedUsername)
+          setClaimStatusData(claimStatus || null)
+
+          // Get current logged in username from Redux store
+          const loggedInUsername = loggedInUser?.username
+          setCurrentUsername(loggedInUsername)
+          // Calculate timer from created_at (10 minutes countdown)
+          const createdAt = response?.data?.created_at ?? response?.created_at
+          let isTimeExpired = false
+          let isOlderThanThreeMinutes = false
+
+          if (createdAt) {
+            const createdAtDate = new Date(createdAt)
+            const currentDate = new Date()
+            const elapsedMilliseconds = currentDate.getTime() - createdAtDate.getTime()
+            const elapsedSeconds = Math.floor(elapsedMilliseconds / 1000)
+
+            console.log('Timer Debug:', {
+              createdAt,
+              createdAtDate: createdAtDate.toString(),
+              currentDate: currentDate.toString(),
+              elapsedMilliseconds,
+              elapsedSeconds,
+              elapsedMinutes: (elapsedSeconds / 60).toFixed(2)
+            })
+
+            // 11000 minutes
+            const totalSeconds = 11000 * 60
+            const remainingSeconds = totalSeconds - elapsedSeconds
+
+            // Check if time has expired
+            isTimeExpired = remainingSeconds <= 0
+
+            // Determine if claim is older than 3 minutes
+            isOlderThanThreeMinutes = elapsedMilliseconds >= 3 * 60 * 1000
+
+            // Set remaining time (countdown)
+            const finalRemaining = remainingSeconds > 0 ? remainingSeconds : 0
+            console.log('Setting timeRemaining to:', finalRemaining)
+            setTimeRemaining(finalRemaining)
+            setTimerStarted(true)
+          }
+
+          setShouldShowRedigitize(shouldEnableRedigitize && isOlderThanThreeMinutes)
+
+          // Determine if view-only mode
+          // View-only if: explicit 'view' mode from navigation state, OR (AUTOMATED status AND different user), OR time expired
+          const isExplicitViewMode = location.state?.mode === 'view'
+          const isViewOnly = isExplicitViewMode || (extractedEditStatus === 'AUTOMATED' && extractedAssignedUsername !== loggedInUsername) || isTimeExpired
+
+          console.log('View-only mode calculation:', {
+            extractedEditStatus,
+            extractedAssignedUsername,
+            loggedInUsername,
+            isTimeExpired,
+            isExplicitViewMode,
+            locationMode: location.state?.mode,
+            isViewOnly
+          })
+
+          setIsViewOnlyMode(isViewOnly)
+
+          // If view mode, unlock all tabs (visible but read-only)
+          if (isViewOnly) {
+            setIsChecklistTabLocked(false)
+            setIsClinicalTabLocked(false)
+            setIsReviewTabLocked(false)
+          }
+
+          // If EDITED status, unlock all tabs
+          if (extractedEditStatus === 'EDITED') {
+            setIsChecklistTabLocked(false)
+            setIsClinicalTabLocked(false)
+            setIsReviewTabLocked(false)
+          }
+        } else {
+          console.warn('Transformation failed, using mock data')
+          const fallbackData = getClaimDetailsById(claimId) || {}
+          setClaimData(fallbackData)
+          const hasFallbackDocuments = Array.isArray(fallbackData?.documents) && fallbackData.documents.length > 0
+          setShowNoDocumentsModal(!hasFallbackDocuments)
+          setShouldShowRedigitize(false)
+        }
+      } catch (err) {
+        console.error('Error fetching claim data:', err)
+        const apiMessage = err?.response?.data?.message || err?.response?.data?.detail || err?.response?.data?.error
+        setError(apiMessage || err.message || 'Failed to load claim data')
+
+        console.warn('API call failed, using mock data')
+        // setClaimData(getClaimDetailsById(claimId) || {})
+      } finally {
+        setLoading(false)
+      }
+    }
+
+    if (claimId) {
+      fetchClaimData()
+    }
+  }, [claimId])
+
+  // Fetch adjudication data when Clinical Validation tab opens
+  useEffect(() => {
+    const fetchClinicalData = async () => {
+      if (activeTab !== 'clinical' || !claimId) return
+
+      try {
+        setClinicalLoading(true)
+        setClinicalError(null)
+
+        let response
+
+        // Step 1: Try to get manual adjudication first
+        try {
+          response = await claimsService.getManualAdjudication(claimId)
+        } catch (manualErr) {
+          // Step 2: If manual adjudication fails, fetch AI adjudication
+          console.log('Manual adjudication not found, fetching AI adjudication')
+          response = await claimsService.getAIAdjudication(claimId)
+        }
+
+        // Step 3: Call re-adjudication
+        // await claimsService.reAdjudicate(claimId)
+
+        // Step 4: Fetch AI adjudication again after re-adjudication
+        // response = await claimsService.getAIAdjudication(claimId)
+
+        // Store the adjudication response for later use
+        setRawApiResponse(response)
+
+        const transformedData = transformAdjudicationData(response)
+
+        if (transformedData) {
+          // Update only the clinical validation data
+          setClaimData(prevData => ({
+            ...prevData,
+            clinicalValidationInvoices: transformedData.clinicalValidationInvoices,
+            financials: transformedData.financials
+          }))
+        }
+      } catch (err) {
+        console.error('Error fetching clinical validation data:', err)
+        // If all API calls fail, try AI adjudication as fallback
+        try {
+          const aiResponse = await claimsService.getAIAdjudication(claimId)
+
+          setRawApiResponse(aiResponse)
+          const transformedData = transformAdjudicationData(aiResponse)
+
+          if (transformedData) {
+            setClaimData(prevData => ({
+              ...prevData,
+              clinicalValidationInvoices: transformedData.clinicalValidationInvoices,
+              financials: transformedData.financials
+            }))
+          }
+        } catch (fallbackErr) {
+          console.error('Error fetching AI adjudication fallback:', fallbackErr)
+          // Both APIs failed, set error state
+          setClinicalError('Details not found')
+        }
+      } finally {
+        setClinicalLoading(false)
+      }
+    }
+
+    fetchClinicalData()
+  }, [activeTab, claimId])
+
+  // Fetch adjudication data when Review tab opens
+  useEffect(() => {
+    const fetchReviewData = async () => {
+      if (activeTab !== 'review' || !claimId) return
+
+      try {
+        setReviewLoading(true)
+
+        let response
+
+        // Try to get manual adjudication first
+        try {
+          response = await claimsService.getManualAdjudication(claimId)
+        } catch (manualErr) {
+          // If manual adjudication fails, fetch AI adjudication
+          console.log('Manual adjudication not found, fetching AI adjudication for review')
+          response = await claimsService.getAIAdjudication(claimId)
+        }
+
+        if (response?.data?.adjudication_response) {
+          const adjudicationResponse = response.data.adjudication_response
+
+          // Store the adjudication response for financial calculations
+          setRawApiResponse(response)
+
+          // Transform adjudication response to review format
+          const reviewData = transformAdjudicationToReview(adjudicationResponse, selectedSymptoms, selectedDiagnoses)
+
+          // Update review data and financials
+          setClaimData(prevData => ({
+            ...prevData,
+            reviewData: reviewData,
+            financials: {
+              ...prevData?.financials,
+              totalApproved: adjudicationResponse.total_allowed_amount || 0,
+              totalSavings: adjudicationResponse.total_savings || 0,
+              approved: adjudicationResponse.total_allowed_amount || 0
+            }
+          }))
+
+          // Update reviewTotals for header
+          setReviewTotals({
+            totalApproved: adjudicationResponse.total_allowed_amount || 0,
+            totalSavings: adjudicationResponse.total_savings || 0
+          })
+        }
+      } catch (err) {
+        console.error('Error fetching review data:', err)
+        // Keep existing data on error
+      } finally {
+        setReviewLoading(false)
+      }
+    }
+
+    fetchReviewData()
+  }, [activeTab, claimId, selectedSymptoms, selectedDiagnoses])
+
+  // Helper function to transform adjudication response to review format
+  const transformAdjudicationToReview = (adjudicationResponse, userSelectedSymptoms, userSelectedDiagnoses) => {
+    const billingData = adjudicationResponse.billing_data || []
+
+    // Group by invoice
+    const invoiceMap = {}
+    billingData.forEach(item => {
+      const invoiceNumber = item.invoice_number || 'UNKNOWN'
+      if (!invoiceMap[invoiceNumber]) {
+        invoiceMap[invoiceNumber] = {
+          invoiceNumber,
+          items: [],
+          totalSavings: 0,
+          totalInvoiced: 0
+        }
+      }
+
+      const approvedQty = item.approved_quantity !== undefined && item.approved_quantity !== null
+        ? item.approved_quantity
+        : item.quantity || 0
+
+      const invoicedAmount = item.request_amount || 0
+      const qty = item.quantity || 1
+      const calculatedRate = qty > 0 ? invoicedAmount / qty : 0
+
+      invoiceMap[invoiceNumber].items.push({
+        category: item.item_category || '',
+        name: item.item_name || '',
+        qty: approvedQty,
+        rate: calculatedRate,
+        preauthAmount: item.tariff_amount || 0,
+        invoicedAmount: invoicedAmount,
+        approvedAmount: item.approved_amount || 0,
+        savings: item.savings || 0,
+        status: item.approved_amount > 0 ? 'Approved' : 'Pending',
+        deductionReasons: (item.deduction_reason || []).join(', ') || '-'
+      })
+
+      invoiceMap[invoiceNumber].totalInvoiced += item.request_amount || 0
+      invoiceMap[invoiceNumber].totalSavings += item.savings || 0
+    })
+
+    // Use user-selected symptoms from Redux store (green labels in Digitisation tab)
+    const symptoms = userSelectedSymptoms.map(s => ({ text: s }))
+
+    // Use user-selected diagnoses from Redux store (green labels in Digitisation tab)
+    const diagnoses = userSelectedDiagnoses.map(d => ({
+      text: d.text,
+      code: d.code || ''
+    }))
+
+    // Calculate total invoiced from sum of all invoice totalInvoiced amounts
+    const totalInvoicedFromInvoices = Object.values(invoiceMap).reduce((acc, invoice) => {
+      return acc + (invoice.totalInvoiced || 0)
+    }, 0)
+
+    return {
+      symptoms: symptoms,
+      diagnoses: diagnoses,
+      invoices: Object.values(invoiceMap),
+      financialSummary: {
+        totalInvoiced: totalInvoicedFromInvoices,
+        totalRequested: adjudicationResponse.total_request_amount || 0,
+        totalApproved: adjudicationResponse.total_allowed_amount || 0,
+        totalSavings: adjudicationResponse.total_savings || 0
+      },
+      productRules: (adjudicationResponse.policy_rules_outcome?.detailed_results || []).map(rule => ({
+        status: rule.status === 'passed' ? 'success' : 'warning',
+        title: rule.category || 'Rule',
+        description: rule.message || ''
+      })),
+      decision: {
+        status: adjudicationResponse.decision?.toLowerCase() || 'pending',
+        title: `Claim ${adjudicationResponse.decision || 'Pending'}`,
+        description: adjudicationResponse.message || 'Awaiting decision'
+      }
+    }
+  }
+
+  // Update timer when assignment status changes (e.g., after extension)
+  useEffect(() => {
+    if (!assignmentStatus) return
+
+    // If assignment status has time_remaining_minutes, use it to update the timer
+    if (assignmentStatus.time_remaining_minutes !== undefined && assignmentStatus.time_remaining_minutes !== null) {
+      const remainingSeconds = assignmentStatus.time_remaining_minutes * 60
+      console.log('Assignment status updated, setting timeRemaining to:', remainingSeconds)
+      setTimeRemaining(remainingSeconds)
+      setTimerStarted(true)
+
+      // Clear timeout modal if timer is extended
+      if (remainingSeconds > 0) {
+        setShowTimeoutModal(false)
+      }
+    }
+  }, [assignmentStatus])
+
+  // Keep header workflow stage in sync with list view status logic
+  useEffect(() => {
+    const base = selectedClaim ? { ...selectedClaim } : claimStatusData ? { ...claimStatusData } : null
+    const composed = { ...(base || {}) }
+
+    const assignmentInfo = assignmentStatus || composed.assignment_status || claimStatusData?.assignment || null
+    if (assignmentInfo) {
+      composed.assignment_status = assignmentInfo
+    }
+
+    if (!composed.edit_status) {
+      composed.edit_status = editStatus || claimStatusData?.edit_status || claimData?.status
+    }
+
+    if (!composed.tat_deadline && claimStatusData?.tat_deadline) {
+      composed.tat_deadline = claimStatusData.tat_deadline
+    }
+
+    if (typeof composed.is_locked === 'undefined' && typeof claimStatusData?.is_locked !== 'undefined') {
+      composed.is_locked = claimStatusData.is_locked
+    }
+
+    if (!composed.final_decision && claimStatusData?.final_decision) {
+      composed.final_decision = claimStatusData.final_decision
+    }
+
+    if (Object.keys(composed).length === 0) {
+      return
+    }
+
+    const stage = getWorkflowStage(composed)
+    setWorkflowStage((prev) => (prev === stage ? prev : stage))
+  }, [selectedClaim, claimStatusData, assignmentStatus, editStatus, claimData?.status])
+
+  // Timer countdown effect - counts down from 10 minutes
+  useEffect(() => {
+    if (!timerStarted || timeRemaining === null) return
+
+    const interval = setInterval(() => {
+      setTimeRemaining(prevTime => {
+        if (prevTime <= 0) {
+          clearInterval(interval)
+
+          // Show timeout modal if timer expires and user is assigned to this claim
+          if (assignedUsername && currentUsername && assignedUsername === currentUsername) {
+            setShowTimeoutModal(true)
+          }
+
+          return 0
+        }
+        // Count down (decrement time)
+        return prevTime - 1
+      })
+    }, 1000)
+
+    return () => clearInterval(interval)
+  }, [timerStarted, timeRemaining, assignedUsername, currentUsername])
+
+
+  const tabs = useMemo(() => [
+    { id: 'patient-info', label: 'Patient Info. Claim & Policy Details' },
+    { id: 'digitisation', label: 'Digitisation' },
+    { id: 'checklist', label: 'Checklist', locked: isChecklistTabLocked },
+    { id: 'clinical', label: 'Clinical Validation', locked: isClinicalTabLocked },
+    { id: 'review', label: 'Review', locked: isReviewTabLocked }
+  ], [isChecklistTabLocked, isClinicalTabLocked, isReviewTabLocked])
+
+  // Calculate dynamic financials for Clinical Validation tab and Review tab
+  const financials = useMemo(() => {
+    // Get Total Requested from lct_claim_request->claim_data->total_cost
+    const totalRequested = rawExtractionResponse?.data?.lct_claim_request?.claim_data?.total_cost || 0
+    // Get Pre-Auth Amount from lct_claim_request->claim_data->preAuthDetails->authorizedAmount
+    const preAuthAmount = rawExtractionResponse?.data?.lct_claim_request?.claim_data?.preAuthDetails?.authorizedAmount || 0
+
+    if (activeTab === 'clinical') {
+      // Use clinicalInvoiceItems if available (edited data), otherwise use initial data
+      const invoicesToCalculate = clinicalInvoiceItems.length > 0
+        ? clinicalInvoiceItems
+        : (claimData?.clinicalValidationInvoices || [])
+
+      // Calculate total approved from clinical validation invoices
+      const totalApproved = invoicesToCalculate.reduce((acc, invoice) => {
+        invoice.items?.forEach(item => {
+          acc += parseFloat(item.appAmt) || 0
+        })
+        return acc
+      }, 0)
+
+      // Get total savings from adjudication_response
+      const totalSavingsFromAPI = rawApiResponse?.data?.adjudication_response?.total_savings || 0
+
+      return {
+        ...claimData?.financials,
+        totalRequested: totalRequested,
+        preAuthAmount: preAuthAmount,
+        approved: totalApproved,
+        totalSavings: totalSavingsFromAPI
+      }
+    }
+
+    if (activeTab === 'review') {
+      // Use reviewTotals from ReviewTab
+      return {
+        ...claimData?.financials,
+        totalRequested: totalRequested,
+        preAuthAmount: preAuthAmount,
+        approved: reviewTotals.totalApproved,
+        totalSavings: reviewTotals.totalSavings
+      }
+    }
+
+    return {
+      ...claimData?.financials,
+      totalRequested: totalRequested,
+      preAuthAmount: preAuthAmount
+    }
+  }, [activeTab, clinicalInvoiceItems, claimData?.clinicalValidationInvoices, claimData?.financials, rawExtractionResponse, reviewTotals])
+  // Updated handleSave with PUT API integration
+  const handleSave = async () => {
+    if (!claimId) return
+
+    // Handle Patient Info tab save
+    if (activeTab === 'patient-info') {
+      setActiveTab('digitisation')
+      return
+    }
+
+    // Handle Digitisation tab save
+    if (activeTab === 'digitisation') {
+      try {
+        // Build PATCH payload with modified invoices and medical info
+        const payload = buildExtractionPatchPayload(
+          rawApiResponse,
+          invoices,
+          validatedInvoices,
+          invalidInvoices,
+          selectedSymptoms,
+          selectedDiagnoses,
+          originalInvoiceKey
+        )
+
+        if (!payload) {
+          // alert('Failed to build update payload. Please try again.')
+          return
+        }
+
+        // Call PATCH API with the constructed payload
+        await claimsService.patchClaimExtractionData(claimId, payload)
+        // alert('Extraction data saved successfully!')
+
+        // Unlock checklist tab and navigate to it
+        setIsChecklistTabLocked(false)
+        setActiveTab('checklist')
+      } catch (err) {
+        console.error('Error updating extraction data:', err)
+        // alert('Failed to save extraction data. Please try again.')
+      }
+      return
+    }
+
+    // Handle Checklist tab save
+    if (activeTab === 'checklist') {
+      try {
+        // Get checklist data from save function
+        if (typeof checklistSaveFunction === 'function') {
+          const checklistData = checklistSaveFunction()
+          console.log('Checklist data to submit:', checklistData)
+
+          // Submit checklist data to API
+          await claimsService.submitChecklistData(claimId, checklistData)
+          // alert('Checklist data saved successfully!')
+        } else {
+          console.error('checklistSaveFunction is not a function:', checklistSaveFunction)
+          throw new Error('Checklist save function not initialized')
+        }
+
+        // Unlock clinical tab and navigate
+        setIsClinicalTabLocked(false)
+        setActiveTab('clinical')
+      } catch (err) {
+        console.error('Error saving checklist data:', err)
+        // alert('Failed to save checklist data. Please try again.')
+      }
+      return
+    }
+
+    // Handle Clinical Validation tab save
+    if (activeTab === 'clinical' && clinicalSaveFunction) {
+      const success = await clinicalSaveFunction()
+      if (success) {
+        // Unlock review tab and navigate to it
+        setIsReviewTabLocked(false)
+        setActiveTab('review')
+      } else {
+        console.error('Failed to save clinical validation data')
+      }
+      return
+    }
+
+    // Handle Review tab save - Finalize adjudication
+    if (activeTab === 'review') {
+      try {
+        await claimsService.finalizeManualAdjudication(claimId)
+
+        // alert('Claim adjudication finalized successfully!')
+
+        // Navigate back to claims list
+        navigate('/claims')
+      } catch (err) {
+        console.error('Error finalizing adjudication:', err)
+        // alert('Failed to finalize adjudication. Please try again.')
+      }
+    }
+  }
+
+  const handleQueryClick = () => {
+    setIsQueryModalOpen(true)
+  }
+
+  // Handle Continue button click for view-only mode
+  const handleContinue = () => {
+    // Just navigate to next tab without saving
+    if (activeTab === 'patient-info') {
+      setActiveTab('digitisation')
+    } else if (activeTab === 'digitisation') {
+      setIsChecklistTabLocked(false)
+      setActiveTab('checklist')
+    } else if (activeTab === 'checklist') {
+      setIsClinicalTabLocked(false)
+      setActiveTab('clinical')
+    } else if (activeTab === 'clinical') {
+      setIsReviewTabLocked(false)
+      setActiveTab('review')
+    } else if (activeTab === 'review') {
+      // On review tab, navigate back to EditManagement page
+      navigate('/claims')
+    }
+  }
+
+  // Handle rerun success - update clinical validation data
+  const handleRerunSuccess = (aiAdjudicationResponse) => {
+    const transformedData = transformAdjudicationData(aiAdjudicationResponse)
+
+    if (transformedData) {
+      // Update clinical validation data with new adjudication results
+      setClaimData(prevData => ({
+        ...prevData,
+        clinicalValidationInvoices: transformedData.clinicalValidationInvoices,
+        financials: transformedData.financials
+      }))
+
+      // Store updated response
+      setRawApiResponse(aiAdjudicationResponse)
+    }
+  }
+
+  // Handle show invoice - find and display the document with matching invoice number
+  const handleShowInvoice = (invoiceNumber) => {
+    if (!claimData?.documents || claimData.documents.length === 0) {
+      console.warn('No documents available')
+      return
+    }
+
+    // Find document index by matching invoice number in document name
+    const documentIndex = claimData.documents.findIndex(doc =>
+      doc.name && doc.name.includes(invoiceNumber)
+    )
+
+    if (documentIndex !== -1) {
+      setSelectedDocumentIndex(documentIndex)
+      setCurrentPage(1) // Reset to first page of document
+    } else {
+      console.warn('Document not found for invoice:', invoiceNumber)
+      // Optionally show a notification to the user
+      alert(`Document for invoice ${invoiceNumber} not found`)
+    }
+  }
+
+  const handleRedigitizeClaim = async () => {
+    if (!claimId || redigitizeLoading) return
+
+    try {
+      setRedigitizeLoading(true)
+      await claimsService.redigitizeClaim({
+        claims: [
+          {
+            claim_unique_id: claimId,
+            notes: 'Re-digitize from the Edit Portal'
+          }
+        ]
+      })
+      setShowRedigitizeInfoModal(true)
+    } catch (err) {
+      console.error('Failed to trigger re-digitization:', err)
+      const message = err?.response?.data?.message || err?.response?.data?.detail || err?.message || 'Failed to trigger re-digitization. Please try again.'
+      alert(message)
+    } finally {
+      setRedigitizeLoading(false)
+    }
+  }
+
+  const handleRedigitizeModalConfirm = () => {
+    setShowRedigitizeInfoModal(false)
+    navigate('/claims')
+  }
+
+  // Loading state
+  // Show assignment error modal first (highest priority)
+  if (showAssignmentErrorModal) {
+    return (
+      <div className="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center">
+        <div className="bg-white rounded-lg shadow-xl p-6 max-w-md w-full mx-4">
+          <div className="text-center">
+            <div className="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-yellow-100 mb-4">
+              <svg className="h-6 w-6 text-yellow-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+            </div>
+            <h3 className="text-lg font-semibold text-gray-900 mb-2">Claim Under Process</h3>
+            <p className="text-sm text-gray-600 mb-6">
+              This claim is currently under process. Please try opening it after some time.
+            </p>
+            <button
+              onClick={() => navigate('/claims')}
+              className="w-full px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors font-medium"
+            >
+              Back to Claims List
+            </button>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  if (loading) {
+    return (
+      <div className="h-screen bg-gray-50 flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
+          <p className="text-gray-600">Loading claim data...</p>
+        </div>
+      </div>
+    )
+  }
+
+  // Error state (with fallback to mock data already handled in useEffect)
+  if (error && !claimData) {
+    return (
+      <div className="h-screen bg-gray-50 flex items-center justify-center">
+        <div className="text-center">
+          <div className="text-red-600 mb-4">
+            <svg className="w-16 h-16 mx-auto" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+          </div>
+          <h2 className="text-xl font-semibold text-gray-900 mb-2">Failed to Load Claim Data</h2>
+          <p className="text-gray-600 mb-4">{error}</p>
+          <div className="flex flex-col sm:flex-row gap-3 justify-center">
+            <button
+              onClick={() => navigate('/claims')}
+              className="px-4 py-2 bg-gray-200 text-gray-800 rounded hover:bg-gray-300"
+            >
+              Back to Claims List
+            </button>
+            <button
+              onClick={() => window.location.reload()}
+              className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700"
+            >
+              Retry
+            </button>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  // No data state
+  if (!claimData) {
+    return (
+      <div className="h-screen bg-gray-50 flex items-center justify-center">
+        <div className="text-center">
+          <p className="text-gray-600">No claim data available</p>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="h-screen bg-gray-50 flex flex-col">
+      {/* Header */}
+      <ClaimHeader
+        claimId={claimData.claimId}
+        claim_id={claimData.claim_id}
+        status={workflowStage}
+        benefitType={claimData.benefitType}
+        timeRemaining={timeRemaining !== null && timeRemaining !== undefined ? timeRemaining : 0}
+        financials={financials}
+      />
+
+      {/* Main Content */}
+      <div className="flex-1 flex overflow-hidden">
+        {/* Left Section - Document Viewer (40%) */}
+        <div className="w-[40%] bg-white border-r border-gray-200 flex flex-col overflow-hidden">
+          <DocumentViewer
+            documents={claimData.documents || []}
+            selectedDocumentIndex={selectedDocumentIndex}
+            onDocumentChange={setSelectedDocumentIndex}
+            currentPage={currentPage}
+            totalPages={claimData.totalPages || 10}
+            onPageChange={setCurrentPage}
+          />
+        </div>
+
+        {/* Right Section - Tabs and Information Panels (60%) */}
+        <div className="w-[60%] flex flex-col bg-white overflow-y-auto">
+          {/* Tabs Navigation */}
+          <TabNavigation
+            activeTab={activeTab}
+            onTabChange={setActiveTab}
+            tabs={tabs}
+          />
+
+          {/* Content Area */}
+          <div className="p-6 bg-white">
+            {activeTab === 'patient-info' && (
+              <div className="space-y-6">
+                {/* Patient and Claim Details - Side by Side */}
+                <div className="grid grid-cols-2 gap-6">
+                  <PatientDetails patient={claimData.patient} />
+                  <ClaimDetails claim={claimData.claim} />
+                </div>
+                {/* Policy Details - Full Width */}
+                <PolicyDetails policy={claimData.policy} />
+              </div>
+            )}
+
+            {activeTab === 'symptoms' && (
+              <div className="text-center text-gray-500 py-12">
+                <p>Symptoms & Diagnosis content will be displayed here</p>
+              </div>
+            )}
+
+            {activeTab === 'digitisation' && (
+              <DigitisationTab
+                digitisationData={claimData.digitisationData}
+                invoices={invoices}
+                setInvoices={setInvoices}
+                validatedInvoices={validatedInvoices}
+                setValidatedInvoices={setValidatedInvoices}
+                invalidInvoices={invalidInvoices}
+                setInvalidInvoices={setInvalidInvoices}
+                showRedigitizeButton={shouldShowRedigitize}
+                onRedigitize={handleRedigitizeClaim}
+                redigitizeLoading={redigitizeLoading}
+              />
+            )}
+
+            {activeTab === 'checklist' && (
+              <ChecklistTab
+                lctClaimRequest={rawExtractionResponse?.data?.lct_claim_request}
+                invoices={claimData.invoices}
+                onShowInvoice={handleShowInvoice}
+                onSave={setChecklistSaveFunction}
+              />
+            )}
+
+            {activeTab === 'clinical' && (
+              <ClinicalValidationTab
+              invoices={claimData.clinicalValidationInvoices}
+              financials={claimData.financials}
+              loading={clinicalLoading}
+              error={clinicalError}
+              rawApiResponse={rawApiResponse}
+              claimUniqueId={rawApiResponse?.data?.claim_unique_id || claimId}
+              onSave={(saveFunc) => setClinicalSaveFunction(() => saveFunc)}
+              onRerunSuccess={handleRerunSuccess}
+              onShowInvoice={handleShowInvoice}
+              onInvoiceItemsChange={setClinicalInvoiceItems}
+            />
+            )}
+
+            {activeTab === 'review' && (
+              <ReviewTab
+                reviewData={claimData.reviewData}
+                onTotalsChange={setReviewTotals}
+              />
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Footer Action Bar */}
+      <ActionBar
+        queryCount={0}
+        onSave={handleSave}
+        onQueryClick={handleQueryClick}
+        invoices={invoices}
+        setInvoices={setInvoices}
+        activeTab={activeTab}
+        validatedInvoices={validatedInvoices}
+        invalidInvoices={invalidInvoices}
+        editStatus={editStatus}
+        isViewOnlyMode={isViewOnlyMode}
+        onContinue={handleContinue}
+      />
+
+      {/* Query Management Modal */}
+      <QueryManagementModal
+        isOpen={isQueryModalOpen}
+        onClose={() => setIsQueryModalOpen(false)}
+        claimId={claimData.claimId}
+      />
+
+      {showRedigitizeInfoModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center">
+          <div className="bg-white rounded-lg shadow-xl p-6 max-w-md w-full mx-4">
+            <div className="text-center">
+              <div className="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-blue-100 mb-4">
+                <svg className="h-6 w-6 text-blue-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+              </div>
+              <h3 className="text-lg font-semibold text-gray-900 mb-2">Re-digitization Started</h3>
+              <p className="text-sm text-gray-600 mb-6">
+                We are processing your request. This can take up to a minute; you can check the claim again after 1 minute.
+              </p>
+              <button
+                onClick={handleRedigitizeModalConfirm}
+                className="w-full px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors font-medium"
+              >
+                OK
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showNoDocumentsModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center">
+          <div className="bg-white rounded-lg shadow-xl p-6 max-w-md w-full mx-4">
+            <div className="text-center">
+              <div className="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-blue-100 mb-4">
+                <svg className="h-6 w-6 text-blue-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M12 2a10 10 0 100 20 10 10 0 000-20z" />
+                </svg>
+              </div>
+              <h3 className="text-lg font-semibold text-gray-900 mb-2">Documents Not Available</h3>
+              <p className="text-sm text-gray-600 mb-6">
+                Supporting documents for this claim could not be retrieved. Please return to the claims list and try another claim.
+              </p>
+              <button
+                onClick={() => navigate('/claims')}
+                className="w-full px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors font-medium"
+              >
+                Back to Claims List
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Timer Timeout Modal */}
+      {showTimeoutModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center">
+          <div className="bg-white rounded-lg shadow-xl p-6 max-w-md w-full mx-4">
+            <div className="text-center">
+              <div className="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-red-100 mb-4">
+                <svg className="h-6 w-6 text-red-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                </svg>
+              </div>
+              <h3 className="text-lg font-semibold text-gray-900 mb-2">Time Elapsed</h3>
+              <p className="text-sm text-gray-600 mb-6">
+                Your allocated time for this claim has expired. You can work on other claims.
+              </p>
+              <button
+                onClick={() => navigate('/claims')}
+                className="w-full px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors font-medium"
+              >
+                Back to Claims List
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+    </div>
+  )
+}
+
+export default PatientClaimInfo

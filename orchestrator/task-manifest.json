@@ -1,0 +1,171 @@
+{
+  "prd_version": "1.0",
+  "generated_at": "2025-11-02T10:30:00Z",
+  "status": "IN_PROGRESS",
+  "current_phase": "Issue Resolution",
+  "total_tasks": 5,
+  "completed_tasks": 1,
+  "pending_tasks": 4,
+  "tasks": [
+    {
+      "id": "ISSUE-1",
+      "title": "Fix Text Visibility Bug",
+      "priority": "P0 - CRITICAL",
+      "feature": "Global CSS Fix",
+      "description": "Fix white text on white background issue affecting 50+ input elements across entire application",
+      "assigned_agent": "frontend-developer",
+      "dependencies": [],
+      "status": "COMPLETED",
+      "acceptance_criteria": [
+        "All input fields have visible dark text",
+        "Login form inputs readable",
+        "Search bars text visible",
+        "Dropdown selected values visible",
+        "Date picker inputs readable"
+      ],
+      "estimated_hours": 0.5,
+      "execution_group": 1,
+      "implementation_details": {
+        "files_modified": [
+          "/src/index.css (lines 23-25)"
+        ],
+        "change_made": "Changed color from white to #213547 for input, select, and textarea elements",
+        "impact": "Fixed text visibility in 50+ input elements across entire application",
+        "completed_at": "2025-11-02T10:15:00Z"
+      }
+    },
+    {
+      "id": "ISSUE-3",
+      "title": "Implement Unified Action Column",
+      "priority": "P1 - HIGH",
+      "feature": "Edit Management Enhancement",
+      "description": "Create single dropdown action menu replacing scattered action buttons, with status-based menu items",
+      "assigned_agent": "fullstack-developer",
+      "dependencies": [],
+      "status": "PENDING - NEXT",
+      "acceptance_criteria": [
+        "Single 'Actions' dropdown column replacing multiple button columns",
+        "Status-based menu items (UNASSIGNED, ASSIGNED, IN_PROGRESS)",
+        "ClaimActionMenu component created",
+        "ClaimAuditModal component created",
+        "Integration with existing claim actions"
+      ],
+      "estimated_hours": 5,
+      "execution_group": 2,
+      "implementation_details": {
+        "files_to_create": [
+          "/src/components/common/ClaimActionMenu.jsx",
+          "/src/components/common/ClaimAuditModal.jsx"
+        ],
+        "files_to_modify": [
+          "/src/pages/EditManagement/constants/columns.jsx"
+        ],
+        "status_scenarios": {
+          "UNASSIGNED": ["Assign Editor", "View Details", "View Audit"],
+          "ASSIGNED": ["Open Edit Tracker", "Reassign Editor", "View Details", "View Audit"],
+          "IN_PROGRESS": ["Open Edit Tracker", "Reassign Editor", "Mark Complete", "View Details", "View Audit"]
+        }
+      }
+    },
+    {
+      "id": "ISSUE-2",
+      "title": "Dashboard Restructuring",
+      "priority": "P1 - HIGH",
+      "feature": "Manager Analytics Enhancement",
+      "description": "Create combined DashboardAnalyticsPage with general view → individual view navigation",
+      "assigned_agent": "frontend-developer",
+      "dependencies": [],
+      "status": "PENDING",
+      "acceptance_criteria": [
+        "DashboardAnalyticsPage component created",
+        "Dashboard and Analytics tabs combined",
+        "General view (all teams) as default",
+        "Clickable navigation to individual team view",
+        "Route updates in App.jsx"
+      ],
+      "estimated_hours": 3.5,
+      "execution_group": 2,
+      "implementation_details": {
+        "files_to_create": [
+          "/src/components/manager/analytics/DashboardAnalyticsPage.jsx"
+        ],
+        "files_to_modify": [
+          "/src/App.jsx"
+        ],
+        "current_structure": {
+          "dashboard": "/src/components/manager/ManagerDashboard.jsx",
+          "analytics": "/src/components/manager/Analytics.jsx",
+          "tabs": ["Dashboard", "Analytics", "Edit Manager", "User Management"]
+        }
+      }
+    },
+    {
+      "id": "ISSUE-4",
+      "title": "Create Audit Log Modals",
+      "priority": "P2 - MEDIUM",
+      "feature": "Audit Infrastructure",
+      "description": "Extract audit table component and create modal wrappers for User and Claim audit trails",
+      "assigned_agent": "frontend-developer",
+      "dependencies": [],
+      "status": "PENDING",
+      "acceptance_criteria": [
+        "AuditTable component extracted",
+        "UserAuditModal created",
+        "ClaimAuditModal created",
+        "Integration with User Management grid",
+        "Integration with Edit Management actions"
+      ],
+      "estimated_hours": 5,
+      "execution_group": 3,
+      "implementation_details": {
+        "files_to_create": [
+          "/src/components/audit/AuditTable.jsx",
+          "/src/components/audit/UserAuditModal.jsx",
+          "/src/components/audit/ClaimAuditModal.jsx",
+          "/src/components/audit/AuditFilters.jsx"
+        ],
+        "files_to_modify": [
+          "/src/pages/UserManagement/UserManagement.jsx",
+          "/src/pages/EditManagement/EditManagement.jsx"
+        ],
+        "current_audit_location": "/src/components/manager/analytics/Audit.jsx"
+      }
+    },
+    {
+      "id": "ISSUE-5",
+      "title": "Implement Editor Role Restrictions",
+      "priority": "P2 - MEDIUM",
+      "feature": "Role Management",
+      "description": "Separate editor creation from user creation, filter editors from User Management grid",
+      "assigned_agent": "fullstack-developer",
+      "dependencies": [],
+      "status": "PENDING",
+      "acceptance_criteria": [
+        "Editors filtered from User Management grid",
+        "Editor option removed from CreateUserModal",
+        "CreateEditorModal created for Edit Manager",
+        "Mock service updated to filter by role",
+        "Role-based grid filtering working"
+      ],
+      "estimated_hours": 3.5,
+      "execution_group": 3,
+      "implementation_details": {
+        "files_to_create": [
+          "/src/components/modals/CreateEditorModal.jsx"
+        ],
+        "files_to_modify": [
+          "/src/services/mockUserService.js",
+          "/src/components/modals/CreateUserModal.jsx",
+          "/src/pages/UserManagement/UserManagement.jsx",
+          "/src/pages/EditManagement/EditManagement.jsx"
+        ],
+        "role_hierarchy": {
+          "admin": "Super Admin",
+          "manager": "Manager",
+          "editor": "Editor (Edit Manager only)",
+          "viewer": "Viewer"
+        }
+      }
+    }
+  ]
+}

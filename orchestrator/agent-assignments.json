@@ -1,0 +1,63 @@
+{
+  "generated_at": "2025-10-31T16:00:00Z",
+  "total_agents": 2,
+  "agents": {
+    "frontend-developer": {
+      "role": "Primary frontend implementation agent",
+      "capabilities": [
+        "React component development",
+        "Redux state management",
+        "Tailwind CSS styling",
+        "Mock service implementation",
+        "API integration"
+      ],
+      "total_tasks": 41,
+      "completed": 0,
+      "in_progress": 0,
+      "pending": 41,
+      "task_ids": [
+        "T0.1", "T0.2", "T0.3", "T0.4", "T0.5", "T0.6", "T0.7", "T0.8", "T0.9",
+        "T1.1", "T1.2", "T1.3", "T1.4", "T1.5",
+        "T2.1", "T2.2", "T2.3", "T2.4", "T2.5", "T2.6", "T2.7", "T2.8", "T2.9", "T2.10", "T2.11", "T2.12",
+        "T3.1", "T3.2", "T3.3", "T3.4", "T3.5", "T3.6",
+        "T4.3", "T4.4", "T4.5"
+      ]
+    },
+    "architect-reviewer": {
+      "role": "Architecture and design validation agent",
+      "capabilities": [
+        "SOLID principles validation",
+        "Design system compliance",
+        "Pattern consistency review",
+        "Code quality assessment"
+      ],
+      "total_tasks": 2,
+      "completed": 0,
+      "in_progress": 0,
+      "pending": 2,
+      "task_ids": [
+        "T4.1", "T4.2"
+      ]
+    },
+    "context-manager": {
+      "role": "Context preservation and handoff coordination",
+      "capabilities": [
+        "Context capture and distribution",
+        "Agent briefing preparation",
+        "Knowledge base maintenance"
+      ],
+      "total_tasks": 0,
+      "completed": 0,
+      "in_progress": 0,
+      "pending": 0,
+      "task_ids": [],
+      "note": "Invoked as needed for context management between major phases"
+    }
+  },
+  "workload_distribution": {
+    "frontend-developer": "95%",
+    "architect-reviewer": "5%",
+    "context-manager": "0% (as-needed basis)"
+  },
+  "execution_strategy": "Parallel within groups, sequential between groups"
+}

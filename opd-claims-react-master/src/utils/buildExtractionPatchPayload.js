@@ -1,0 +1,198 @@
+const normalizeLineItems = (items = []) => {
+  return items
+    .map(item => ({
+      item_name: (item.item_name ?? item.item ?? '').toString().trim(),
+      item_category: (item.item_category ?? item.category ?? '').toString().trim(),
+      unit: Number(item.unit ?? item.qty ?? 0),
+      unit_price: Number(item.unit_price ?? item.unit ?? 0),
+      request_amount: Number(item.request_amount ?? item.amount ?? 0),
+      necessary: (item.necessary ?? 'YES').toString().trim(),
+      message: (item.message ?? '').toString().trim(),
+    }))
+    .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)))
+}
+
+const normalizeInvoicesForComparison = (invoices = []) => {
+  return invoices
+    .map(invoice => ({
+      invoice_id: (invoice.invoice_id ?? invoice.invoice_number ?? '').toString().trim(),
+      invoice_number: (invoice.invoice_number ?? invoice.invoice_id ?? '').toString().trim(),
+      invoice_date: (invoice.invoice_date ?? '').toString().trim(),
+      invoice_total_amount: Number(
+        invoice.invoice_total_amount ??
+        invoice.invoice_total_amt ??
+        invoice.totalAmount ??
+        invoice.invoice_total ??
+        0
+      ),
+      line_items: normalizeLineItems(invoice.line_items ?? invoice.items ?? []),
+    }))
+    .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)))
+}
+
+const normalizeSymptomsForComparison = (symptoms = []) => {
+  return symptoms
+    .map(symptom => {
+      if (typeof symptom === 'string') return symptom
+      if (typeof symptom === 'object' && symptom !== null) {
+        return symptom.text || symptom.value || ''
+      }
+      return ''
+    })
+    .filter(Boolean)
+    .map(value => value.toString().trim().toLowerCase())
+    .sort()
+}
+
+const normalizeDiagnosesForComparison = (diagnoses = []) => {
+  return diagnoses
+    .map(diagnosis => ({
+      text: (diagnosis.text ?? diagnosis.diagnosis_name ?? '').toString().trim().toLowerCase(),
+      code: (diagnosis.code ?? diagnosis.icd_code ?? '').toString().trim().toLowerCase(),
+    }))
+    .filter(d => d.text || d.code)
+    .map(d => `${d.code}::${d.text}`)
+    .sort()
+}
+
+/**
+ * Build PATCH payload for extraction data updates
+ * Handles invoice modifications, invalidations, and medical info updates
+ *
+ * @param {Object} rawApiResponse - Original API response from extraction-data endpoint
+ * @param {Array} modifiedInvoices - Array of modified invoices from UI
+ * @param {Object} validatedInvoices - Map of validated invoice indices
+ * @param {Object} invalidInvoices - Map of invalidated invoice indices
+ * @param {Array} selectedSymptoms - Array of selected symptom strings
+ * @param {Array} selectedDiagnoses - Array of selected diagnosis objects {text, code}
+ * @param {string} originalInvoiceKey - Original invoice key from API response (e.g., 'invoices', '?2_invoices')
+ * @returns {Object} Payload for PATCH request
+ */
+export const buildExtractionPatchPayload = (
+  rawApiResponse,
+  modifiedInvoices,
+  validatedInvoices = {},
+  invalidInvoices = {},
+  selectedSymptoms = [],
+  selectedDiagnoses = [],
+  originalInvoiceKey = 'invoices'
+) => {
+  if (!rawApiResponse?.data?.output_data) {
+    console.error('Invalid raw API response:', rawApiResponse)
+    return null
+  }
+
+  const originalOutputData = rawApiResponse.data.output_data
+
+  // Filter out invalid invoices and transform modified invoices back to API format
+  const validInvoices = modifiedInvoices
+    .map((invoice, index) => {
+      // Skip invalid invoices
+      if (invalidInvoices[index]) {
+        return null
+      }
+
+      // Transform invoice items back to API format
+      const lineItems = invoice.items.map(item => ({
+        item_name: item.item,
+        item_category: item.category,
+        unit: item.qty,
+        unit_price: item.unit,
+        request_amount: item.amount,
+        necessary: item.necessary || 'YES',
+        message: item.message || ''
+      }))
+
+      return {
+        invoice_id: invoice.invoiceNumber,
+        invoice_number: invoice.invoiceNumber,
+        invoice_date: invoice.invoiceDate || '',
+        invoice_total_amount: invoice.totalAmount,
+        line_items: lineItems
+      }
+    })
+    .filter(invoice => invoice !== null) // Remove nulls (invalid invoices)
+
+  // Update medical info with selected symptoms and diagnoses
+  const updatedMedicalInfo = {
+    ...(originalOutputData.medical_info || {}),
+    symptoms: selectedSymptoms.map(symptom => ({
+      value: symptom
+    })),
+    diagnosis: selectedDiagnoses.map(diagnosis => ({
+      diagnosis_name: diagnosis.text,
+      icd_code: diagnosis.code || ''
+    }))
+  }
+
+  // Calculate updated billing details from valid invoices
+  const totalRequestAmount = validInvoices.reduce((sum, invoice) => {
+    return sum + (invoice.invoice_total_amount || 0)
+  }, 0)
+
+  // Build bill_breakup array where each item is wrapped with line_data key
+  const billBreakup = []
+  validInvoices.forEach(invoice => {
+    invoice.line_items?.forEach(item => {
+      billBreakup.push({
+        line_data: {
+          item_name: item.item_name,
+          item_category: item.item_category,
+          unit: item.unit,
+          unit_price: item.unit_price,
+          request_amount: item.request_amount,
+          necessary: item.necessary,
+          message: item.message,
+          invoice_number: invoice.invoice_number
+        }
+      })
+    })
+  })
+
+  const updatedBillingDetails = {
+    ...(originalOutputData.billing_details || {}),
+    total_req_amount: {
+      value: totalRequestAmount,
+      confidence_score: originalOutputData.billing_details?.total_req_amount?.confidence_score || 0
+    },
+    bill_breakup: billBreakup
+  }
+
+  const originalInvoicesRaw = originalOutputData[originalInvoiceKey] || []
+
+  const invoicesChanged = JSON.stringify(
+    normalizeInvoicesForComparison(validInvoices)
+  ) !== JSON.stringify(
+    normalizeInvoicesForComparison(originalInvoicesRaw)
+  )
+
+  const originalMedicalInfo = originalOutputData.medical_info || {}
+
+  const symptomsChanged = JSON.stringify(
+    normalizeSymptomsForComparison(selectedSymptoms)
+  ) !== JSON.stringify(
+    normalizeSymptomsForComparison(originalMedicalInfo.symptoms || [])
+  )
+
+  const diagnosesChanged = JSON.stringify(
+    normalizeDiagnosesForComparison(selectedDiagnoses)
+  ) !== JSON.stringify(
+    normalizeDiagnosesForComparison(originalMedicalInfo.diagnosis || [])
+  )
+
+  const hasChanges = invoicesChanged || symptomsChanged || diagnosesChanged
+
+  // Build the final payload with only output_data
+  // Use the original invoice key to preserve the API response structure
+  const payload = {
+    output_data: {
+      ...originalOutputData,
+      medical_info: updatedMedicalInfo,
+      billing_details: updatedBillingDetails,
+      [originalInvoiceKey]: validInvoices
+    },
+    trigger_readjudication: hasChanges
+  }
+
+  return payload
+}
